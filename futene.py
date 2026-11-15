@@ -72,7 +72,7 @@ class StillRun:
     def frame(s):
         r = s.r
         if s.run <= 0:                       # 区間が替わると刻みも替わる
-            s.hold = r.choice([1, 1, 2, 3, 5, 12]); s.run = r.randint(6, 30)
+            s.hold = r.choice([8, 12, 16, 24, 36]); s.run = r.randint(30, 90)   # 静止画は派手なので遅く
             if r.random() < .3: s.i = r.randrange(len(s.st))
         if s.left <= 0:
             s.i = (s.i + (1 if r.random() < .8 else r.randint(2, 20))) % len(s.st)
@@ -169,12 +169,13 @@ def plan(total, rnd):
 class Release:
     def __init__(s, rnd, nf, video):
         s.r, s.nf, s.video = rnd, nf, video
-        s.mode = rnd.choice(["shrink", "float", "rotate", "bars", "shrink", "tilt"])
+        s.mode = rnd.choice(["shrink", "float", "rotate", "bars", "tilt", "shake", "shake", "drop", "drop"])
         s.bg = rnd.choice([None, "black", "dots"]) if video else rnd.choice(["black", "dots"])
         s.dots = dots(rnd)
         s.angles = [rnd.choice([0, 90, -90, 180, 25, -30, 12]) for _ in range(64)]
         s.min_s = rnd.uniform(.03, .35)
         s.ease = rnd.choice([.3, .6, 1, 2.5, 4])
+        s.drop_rot = rnd.choice([0, 0, 3, -4, 9]); s.drop_x = rnd.uniform(-200, 200)
 
     def apply(s, im, f):
         r = s.r; p = f / max(1, s.nf - 1)
@@ -188,6 +189,17 @@ class Release:
         if s.mode == "float":        # ふわっと漂う
             sc = .55 + .1 * math.sin(p * math.pi * 2)
             return paste_scaled(base, im, sc, W * .18 * math.sin(p * 5), H * .12 * math.cos(p * 3.3), 3 * math.sin(p * 4))
+        if s.mode == "shake":        # おもいきり振るえる
+            k = f // r.choice([1, 2])
+            rr = random.Random(k * 7919 + s.nf)
+            amp = rr.choice([30, 60, 110])
+            return paste_scaled(base, im, rr.uniform(.82, .97), rr.uniform(-amp, amp), rr.uniform(-amp, amp) * .6, rr.uniform(-7, 7))
+        if s.mode == "drop":         # カクカクしながら落ちていく
+            step = 4; k = (f // step) * step
+            q = k / max(1, s.nf)
+            y = (H * 1.3) * (q ** 1.8)
+            ang = (k // step) * s.drop_rot
+            return paste_scaled(base, im, .8 - .2 * q, s.drop_x, y, ang)
         if s.mode == "rotate":       # コマごとに角度が変わる
             return paste_scaled(base, im, .8, 0, 0, s.angles[(f // 3) % len(s.angles)])
         if s.mode == "tilt":         # 斜めに切って下を見せる
@@ -272,13 +284,15 @@ def render(a, seed, out):
         bgA = swirl_bg(video, rnd)
         frameA = rnd.choice(["round", "bars", "rect", "round"])
         bst = cast.new_b(t)
-        period = rnd.choice([1, 2, 2, 3])          # 二枚の行き来の刻み
-        bswap = rnd.choice([3, 3, 4, 6])           # Bの中身が替わる刻み
+        period = rnd.choice([4, 6, 8, 10, 14])     # 二枚の行き来の刻み（連番自体が速いので遅め）
+        bswap = rnd.choice([10, 14, 20])           # Bの中身が替わる刻み
         rel = Release(rnd, nf, video) if kind == "release" else None
         bur = Burst(rnd, nf, video, stills) if kind == "burst" else None
         srun = StillRun(stills, rnd) if stills else None
         use_still = stills and rnd.random() < .5
         glitchy = rnd.random() < .25
+        mono = rnd.random() < .3                    # この段は白黒
+        mono_flash = rnd.random() < .3              # ときどき白黒がはさまる
         for f in range(nf):
             if video:
                 if f % 9 == 0: video.step()
@@ -315,6 +329,8 @@ def render(a, seed, out):
             else:  # anchor / outro: 錨に戻る
                 im = A
             if glitchy and kind == "press" and (t // 2) % 3 == 0: im = dm.glitch(im, rnd)
+            if kind not in ("intro", "outro") and (mono or (mono_flash and (t // 6) % 5 == 0)):
+                im = ImageOps.grayscale(im.convert("RGB")).convert("RGB")
             ff.stdin.write(im.convert("RGB").tobytes()); t += 1
     ff.stdin.close(); ff.wait()
 
