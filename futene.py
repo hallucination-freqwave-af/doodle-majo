@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""ふて寝の型 — 初期パラグルビート（キブンヤのmajo ふて寝4）から取り出した型。
+
+芯は「圧と抜きの落差」。
+  圧 : 二枚（A=枠に入った錨 / B=別のもの）を1〜3コマで行き来させる
+  抜き: フレームそのものを縮める・動かす・傾ける・黒帯で狭める。浮遊感と溜め
+  錨 : 最初の連番フォルダ（または --anchor）が何度も戻ってくる
+どこで抜くか、どれくらい詰めるかはシードまかせ。何本か出して偶然を拾う。
+
+使い方:
+  python3 futene.py --people materials/people --bgvideo materials/bgv \
+      --audio 曲 --title タイトル --out 出力.mp4 --seed 1 [--anchor フォルダ名]
+  --seeds 1,2,3 で何本かまとめて出す（出力名に _s番号 が付く）
+"""
+import argparse, math, os, random, subprocess, sys
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageChops, ImageFilter
+import doodle_majo as dm
+
+W, H, FPS = dm.W, dm.H, dm.FPS
+
+
+# ---------- 柄 ----------
+def zigzag(rnd):
+    a, b = rnd.sample(["#111111", "#e8f000", "#5ad1c8", "#ff3d8b", "#2a3fd0", "#ffffff"], 2)
+    im = Image.new("RGB", (W, H), a); d = ImageDraw.Draw(im)
+    amp, step, th = rnd.choice([(80, 120, 70), (50, 80, 45), (120, 180, 100)])
+    for y0 in range(-amp, H + 2 * amp, th * 2 + amp):
+        d.line([(x, y0 + (amp if (x // step) % 2 else 0)) for x in range(-step, W + step, step)], fill=b, width=th)
+    return im
+
+
+def dots(rnd):
+    bg, fg = rnd.sample(["#f6d6d6", "#e8e2d8", "#111111", "#2a3fd0", "#ffd400"], 2)
+    im = Image.new("RGB", (W, H), bg); d = ImageDraw.Draw(im); s = rnd.choice([16, 22, 30])
+    for y in range(0, H, s):
+        for x in range(0, W, s): d.ellipse([x - 2, y - 2, x + 2, y + 2], fill=fg)
+    return im
+
+
+def lines(rnd):
+    im = Image.new("RGB", (W, H), "#ffffff"); d = ImageDraw.Draw(im)
+    for k in range(-40, 80):
+        y = k * 28
+        d.line([(x, y + 60 * math.sin(x / 260 + k * .1)) for x in range(0, W + 40, 40)], fill="#111111", width=4)
+    return im
+
+
+def swirl_bg(video, rnd):
+    """背景: 動画か柄"""
+    if video and rnd.random() < .6: return None
+    return rnd.choice([zigzag, dots, lines, lambda r: dm.graphic_full(r)])(rnd)
+
+
+# ---------- 枠 ----------
+def rounded_mask(w, h, r):
+    m = Image.new("L", (w, h), 0); ImageDraw.Draw(m).rounded_rectangle([0, 0, w - 1, h - 1], r, fill=255)
+    return m.filter(ImageFilter.GaussianBlur(r * .25))
+
+
+def framed(content, rnd, kind=None):
+    """content(W×H)を枠に入れて返す（RGBA、枠の外は透明）"""
+    kind = kind or rnd.choice(["round", "bars", "rect", "round"])
+    sc = rnd.uniform(.62, .85)
+    w, h = int(W * sc), int(H * sc)
+    c = content.resize((w, h)).convert("RGBA")
+    if kind == "round":
+        c.putalpha(rounded_mask(w, h, int(h * .28)))
+    elif kind == "bars":
+        d = ImageDraw.Draw(c); bh = int(h * rnd.uniform(.08, .18))
+        d.rectangle([0, h - bh, w, h], fill="#000000")
+        if rnd.random() < .5: d.rectangle([0, 0, w, bh // 2], fill="#000000")
+    return c
+
+
+# ---------- 中身 ----------
+class Cast:
+    def __init__(s, seqs, anchor_i, video, bgs, rnd):
+        s.seqs, s.ai, s.video, s.bgs, s.r = seqs, anchor_i, video, bgs, rnd
+        s.others = [q for i, q in enumerate(seqs) if i != anchor_i] or seqs
+
+    def anchor_scene(s, t, actor, bg=None):
+        """錨の場面: 白っぽい地に錨（二人並べることもある）"""
+        im = bg.copy() if bg is not None else Image.new("RGB", (W, H), "#e9e4dc")
+        put = dm.put
+        if actor.get("pair"):
+            put(im, actor["a"].img(t), H * .9, W * .36, H); put(im, actor["b"].img(t), H * .9, W * .64, H)
+        else:
+            put(im, actor["a"].img(t), H * .95, W * .5, H)
+        return im
+
+    def b_scene(s, t, st):
+        """B: 別のキャラを図形の面に、または柄そのもの、または背景動画"""
+        r = s.r
+        if st["kind"] == "pattern": return st["pat"]
+        if st["kind"] == "video" and s.video: return s.video.frame().copy()
+        im = st["panel"].copy()
+        dm.put(im, st["actor"].img(t), H * st["h"], W * st["x"], H)
+        return im
+
+    def new_b(s, t):
+        r = s.r
+        k = r.random()
+        if k < .3: return {"kind": "pattern", "pat": zigzag(r) if r.random() < .6 else dots(r)}
+        if k < .45 and s.video: return {"kind": "video"}
+        return {"kind": "char", "panel": dm.graphic_full(r), "actor": dm.Actor(s.others, r, t),
+                "h": r.uniform(.8, 1.1), "x": r.uniform(.35, .65)}
+
+    def new_anchor(s, t):
+        r = s.r; aseq = [s.seqs[s.ai]]
+        a = dm.Actor(aseq, r, t)
+        if r.random() < .5:
+            return {"a": a, "b": dm.Actor(aseq, r, t), "pair": True}
+        return {"a": a}
+
+
+# ---------- 段の並び（毎回ちがう） ----------
+def plan(total, rnd):
+    segs = [("intro", total * rnd.uniform(.07, .1))]
+    outro = total * rnd.uniform(.05, .08)
+    left = total - segs[0][1] - outro
+    while left > 0.5:
+        if segs[-1][0] in ("press",):
+            L = rnd.uniform(1.0, 6.0); kind = "release"
+        else:
+            L = rnd.uniform(3.0, 13.0); kind = "press"
+            if rnd.random() < .25: kind = "anchor"; L = rnd.uniform(1.5, 4)
+        L = min(L, left)
+        if kind == "press" and L > 4 and rnd.random() < .4:     # 山の途中にいきなり抜く
+            cut = rnd.uniform(1.5, L - 1.5); short = rnd.uniform(.4, 1.2)
+            segs += [("press", cut), ("release", short), ("press", L - cut)]
+            left -= L + short
+            continue
+        segs.append((kind, L)); left -= L
+    segs.append(("outro", outro))
+    return segs
+
+
+# ---------- 抜き（フレームそのものを動かす） ----------
+class Release:
+    def __init__(s, rnd, nf, video):
+        s.r, s.nf, s.video = rnd, nf, video
+        s.mode = rnd.choice(["shrink", "float", "rotate", "bars", "shrink", "tilt"])
+        s.bg = rnd.choice([None, "black", "dots"]) if video else rnd.choice(["black", "dots"])
+        s.dots = dots(rnd)
+        s.angles = [rnd.choice([0, 90, -90, 180, 25, -30, 12]) for _ in range(64)]
+        s.min_s = rnd.uniform(.03, .35)
+
+    def apply(s, im, f):
+        r = s.r; p = f / max(1, s.nf - 1)
+        base = (s.video.frame().copy() if s.bg is None else
+                Image.new("RGB", (W, H), "#000000") if s.bg == "black" else s.dots.copy())
+        if s.bg is None: base = base.point(lambda v: v * .45)
+        if s.mode == "shrink":       # 点まで縮んで戻る
+            sc = s.min_s + (1 - s.min_s) * abs(math.cos(math.pi * p))
+            return paste_scaled(base, im, sc, 0, 0, 0)
+        if s.mode == "float":        # ふわっと漂う
+            sc = .55 + .1 * math.sin(p * math.pi * 2)
+            return paste_scaled(base, im, sc, W * .18 * math.sin(p * 5), H * .12 * math.cos(p * 3.3), 3 * math.sin(p * 4))
+        if s.mode == "rotate":       # コマごとに角度が変わる
+            return paste_scaled(base, im, .8, 0, 0, s.angles[(f // 3) % len(s.angles)])
+        if s.mode == "tilt":         # 斜めに切って下を見せる
+            sc = .85; ang = s.angles[(f // 4) % len(s.angles)]
+            out = paste_scaled(base, im, sc, r.uniform(-40, 40), 0, ang)
+            d = ImageDraw.Draw(out)
+            d.polygon([(W * .55, H), (W, H * .25), (W, H)], fill="#3a9a5c")
+            return out
+        # bars: 黒帯が上下から締める
+        bh = int(H * .45 * math.sin(math.pi * p))
+        out = im.copy(); d = ImageDraw.Draw(out)
+        d.rectangle([0, 0, W, bh], fill="#000000"); d.rectangle([0, H - bh, W, H], fill="#000000")
+        return out
+
+
+def paste_scaled(base, im, sc, dx, dy, ang):
+    w, h = max(2, int(W * sc)), max(2, int(H * sc))
+    c = im.resize((w, h)).convert("RGBA")
+    if ang: c = c.rotate(ang, expand=True, resample=Image.BILINEAR)
+    base.paste(c, (int((W - c.width) / 2 + dx), int((H - c.height) / 2 + dy)), c)
+    return base
+
+
+# ---------- 組む ----------
+def render(a, seed, out):
+    rnd = random.Random(seed)
+    seqs = dm.load_seqs(a.people)
+    names = sorted(d for d in os.listdir(a.people) if os.path.isdir(os.path.join(a.people, d)))
+    ai = names.index(a.anchor) if a.anchor in names else 0
+    video = dm.BgVideo(a.bgvideo, random.Random(seed + 7)) if a.bgvideo else None
+    cast = Cast(seqs, ai, video, [], rnd)
+    total = dm.duration(a.audio)
+    segs = plan(total, rnd)
+    print(f"seed {seed}: " + " ".join(f"{k}{L:.1f}" for k, L in segs), file=sys.stderr)
+
+    ff = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
+                           "-r", str(FPS), "-i", "-", "-i", a.audio, "-shortest", "-c:a", "aac", "-b:a", "256k",
+                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", out],
+                          stdin=subprocess.PIPE)
+    fj = ImageFont.truetype(dm.FONT_JP, 220); fe = ImageFont.truetype(dm.FONT, 150)
+    t = 0
+    for kind, L in segs:
+        nf = int(round(L * FPS))
+        anc = cast.new_anchor(t)
+        bgA = swirl_bg(video, rnd)
+        frameA = rnd.choice(["round", "bars", "rect", "round"])
+        bst = cast.new_b(t)
+        period = rnd.choice([1, 2, 2, 3])          # 二枚の行き来の刻み
+        bswap = rnd.choice([3, 3, 4, 6])           # Bの中身が替わる刻み
+        rel = Release(rnd, nf, video) if kind == "release" else None
+        glitchy = rnd.random() < .25
+        for f in range(nf):
+            if video:
+                if f % 9 == 0: video.step()
+            # A: 枠に入った錨
+            scene = cast.anchor_scene(t, anc)
+            if kind in ("press", "release"):
+                base = (video.frame().copy() if bgA is None and video else (bgA or zigzag(rnd)).copy())
+                fr = framed(scene, random.Random(seed * 1000 + int(t / 30)), frameA)
+                base.paste(fr, ((W - fr.width) // 2, (H - fr.height) // 2), fr)
+                A = base
+            else:
+                A = scene
+            if kind == "press":
+                if f % bswap == 0 and rnd.random() < .7: bst = cast.new_b(t)
+                im = A if (f // period) % 2 == 0 else cast.b_scene(t, bst)
+                if f % 15 == 0 and rnd.random() < .3:
+                    anc = cast.new_anchor(t)
+                for x in anc.values():
+                    if isinstance(x, dm.Actor) and rnd.random() < .02: x.maybe_stutter(t)
+            elif kind == "release":
+                im = rel.apply(A, f)
+            elif kind == "intro":
+                im = A.copy(); d = ImageDraw.Draw(im)
+                if f > nf * .15:
+                    txt = "dreaming majo" if f < nf * .55 else (a.title or "")
+                    font = fe if f < nf * .55 else fj
+                    tw = d.textlength(txt, font=font)
+                    d.text(((W - tw) / 2, H * .38), txt, font=font,
+                           fill="#e0242b" if f < nf * .55 else "#5ad1f0", stroke_width=6, stroke_fill="#ffffff")
+            else:  # anchor / outro: 錨に戻る
+                im = A
+            if glitchy and kind == "press" and (t // 2) % 3 == 0: im = dm.glitch(im, rnd)
+            ff.stdin.write(im.convert("RGB").tobytes()); t += 1
+    ff.stdin.close(); ff.wait()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--people", required=True); ap.add_argument("--bgvideo", default="")
+    ap.add_argument("--audio", required=True); ap.add_argument("--title", default="")
+    ap.add_argument("--anchor", default=""); ap.add_argument("--out", default="futene.mp4")
+    ap.add_argument("--seed", type=int, default=1); ap.add_argument("--seeds", default="")
+    a = ap.parse_args()
+    seeds = [int(x) for x in a.seeds.split(",")] if a.seeds else [a.seed]
+    for s in seeds:
+        out = a.out if len(seeds) == 1 else a.out.replace(".mp4", f"_s{s}.mp4")
+        render(a, s, out)
+
+
+if __name__ == "__main__":
+    main()
