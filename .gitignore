@@ -1,0 +1,6 @@
+*.mp4
+*.mov
+*.aif
+*.mp3
+materials/
+__pycache__/
