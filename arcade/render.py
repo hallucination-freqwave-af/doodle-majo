@@ -19,6 +19,18 @@ def kick(t):  # smoothed low energy peak
 def hit(t):   # onset strength
     return af(flux, t)
 def beatphase(t): return (t / BEAT) % 1.0
+# real bass-drum onsets (low band rising through 0.45, min gap 0.12s) -> kickpulse(t) decays from 1 after each hit
+_ons = []; _last = -99
+for _i in range(1, len(low)):
+    if low[_i] > 0.45 and low[_i - 1] <= 0.45 and (_i - _last) > AFPS * 0.12: _ons.append(_i / AFPS); _last = _i
+KICKS = np.array(_ons)
+def offpulse(t, width=10.0):  # peaks halfway between two real kicks (the 裏)
+    j = np.searchsorted(KICKS, t)
+    if j <= 0 or j >= len(KICKS): return 0.0
+    mid = (KICKS[j - 1] + KICKS[j]) / 2; return float(np.exp(-abs(t - mid) * width))
+def kickpulse(t, decay=7.0):
+    j = np.searchsorted(KICKS, t) - 1
+    return float(np.exp(-(t - KICKS[j]) * decay)) if j >= 0 else 0.0
 
 FONT_JP = '/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc'
 _fonts = {}
