@@ -82,3 +82,8 @@ python3 futene.py --people materials/people --bgvideo materials/bgv \
 A template extracted from "Doodle of Majo" by dreaming majo.
 Give it PNG-sequence cutouts, a background video and a track; it builds a video in five sections.
 The template is a starting point, not a finished form.
+
+## arcade/ — アーケードの型（2026-11）
+
+ポスター画像（何枚でも）と曲から、1枚1芸＋両脇に1990年風の縦シュー／回るテトリスを置いた16:9動画を組む道具。
+真ん中のコマ数を場面ごとに落として（4〜15）、脇は30のまま。詳しくは `arcade/README.md`。
