@@ -242,3 +242,170 @@ class TetrisSpin(Base):
         ox, oy = (GW - bw - 8) // 2, (GH - bh - 8) // 2
         self.g[oy:oy + bh + 8, ox:ox + bw + 8] = rot
         return self.finish()
+
+
+# ---------------- more side games (variety) ----------------
+CAR = ["..1111..", ".122221.", ".133331.", "12222221", "12444421", ".122221.", ".133331.", "12222221", "11....11"]
+
+class Racer(Base):
+    """top-down neon road; kick = boost (lines rush), hit = a car spins out in sparks"""
+    def __init__(self, seed):
+        super().__init__(seed); self.scroll = 0; self.boost = 0; self.cars = []; self.px_ = GW / 2; self.spark = []; self.spawn = 0
+        self.pal = [(255, 60, 140), (0, 220, 255), (255, 200, 0), (120, 255, 120)]
+    def step(self, dt, kick, hit):
+        self.t += dt; self.boost = max(self.boost * (1 - 3 * dt), kick); sp = 90 + 260 * self.boost
+        self.scroll += sp * dt; self.spawn += dt; self.shake = max(0, self.shake - dt)
+        if self.spawn > 0.7: self.spawn = 0; self.cars.append([30 + self.r.integers(0, 4) * 20, -20, self.r.integers(0, 4), 0])
+        for c in self.cars: c[1] += (sp - 60) * dt; c[3] = max(0, c[3] - dt)
+        if hit > 0.8 and self.cars:
+            c = self.cars[self.r.integers(0, len(self.cars))]; c[3] = 0.6; self.shake = 0.2
+            for _ in range(10): a = self.r.random() * 6.3; self.spark.append([c[0] + 8, c[1] + 9, math.cos(a) * 70, math.sin(a) * 70, 0.4])
+        self.cars = [c for c in self.cars if c[1] < GH + 20]
+        tgt = min(self.cars, key=lambda c: abs(c[1] - (GH - 40)))[0] if self.cars else GW / 2
+        self.px_ += ((GW - tgt) * 0.9 - self.px_ + 10 * math.sin(self.t * 3)) * min(1, 2 * dt); self.px_ = min(max(self.px_, 26), GW - 42)
+        for s in self.spark: s[0] += s[2] * dt; s[1] += s[3] * dt; s[4] -= dt
+        self.spark = [s for s in self.spark if s[4] > 0]
+    def draw(self):
+        yy = np.linspace(0, 1, GH)[:, None]
+        self.g[:] = (np.stack([30 + 40 * yy, 10 + 10 * yy, 60 + 40 * yy], -1) * np.ones((GH, GW, 1))).astype(np.uint8)
+        self.rect(18, 0, GW - 36, GH, (25, 25, 35))
+        for y in range(-40, GH + 40, 40):
+            yy2 = (y + self.scroll) % (GH + 40) - 20
+            for lx in (38, 58, 78): self.rect(lx + 10, yy2, 2, 18, (230, 230, 230) if self.boost < 0.6 else (255, 120, 220))
+            self.rect(14, yy2, 4, 20, (255, 60, 60)); self.rect(14, yy2 + 20, 4, 20, (255, 255, 255))
+            self.rect(GW - 18, yy2, 4, 20, (255, 60, 60)); self.rect(GW - 18, yy2 + 20, 4, 20, (255, 255, 255))
+        if self.boost > 0.6:
+            for k in range(20): x = self.r.integers(20, GW - 20); y = self.r.integers(0, GH); self.rect(x, y, 1, 14, (255, 255, 255))
+        for c in self.cars:
+            col = self.pal[c[2]]; pal = {'1': (20, 20, 20), '2': col, '3': (180, 230, 255), '4': (255, 255, 255)}
+            if c[3] > 0 and int(self.t * 20) % 2: pal = {k: (255, 255, 255) for k in pal}
+            self.sprite(c[0], c[1], CAR, pal)
+        self.sprite(self.px_, GH - 40, CAR, {'1': (20, 20, 20), '2': (255, 255, 255), '3': (120, 200, 255), '4': (255, 80, 80)})
+        self.rect(self.px_ + 4, GH - 20, 2, 4 + int(8 * self.boost), (255, 160, 60)); self.rect(self.px_ + 10, GH - 20, 2, 4 + int(8 * self.boost), (255, 160, 60))
+        for s in self.spark: self.rect(s[0], s[1], 2, 2, (255, 220, 80))
+        return self.finish()
+
+class Blobs(Base):
+    """falling-blob puzzle: pairs drop; on each strong kick every group of 3+ pops in a flash and the rest fall (chains)"""
+    COLS = [(255, 70, 120), (60, 220, 255), (255, 220, 60), (120, 255, 120), (190, 110, 255)]
+    def __init__(self, seed):
+        super().__init__(seed); self.cw, self.ch = 6, 13; self.c = 18; self.b = np.full((self.ch, self.cw), -1)
+        self.new(); self.tick = 0; self.pop = []; self.pt = 0; self.combo = 0
+        for j in range(self.ch - 4, self.ch):
+            for i in range(self.cw): self.b[j, i] = self.r.integers(0, 5)
+    def new(self): self.x = int(self.r.integers(0, self.cw - 1)); self.y = 0; self.pair = (int(self.r.integers(0, 5)), int(self.r.integers(0, 5)))
+    def free(self, x, y): return 0 <= x < self.cw and y < self.ch and (y < 0 or self.b[y, x] < 0)
+    def settle(self):
+        for i in range(self.cw):
+            col = [v for v in self.b[:, i] if v >= 0]; self.b[:, i] = -1
+            if col: self.b[self.ch - len(col):, i] = col
+    def groups(self):
+        seen = np.zeros_like(self.b, bool); out = []
+        for j in range(self.ch):
+            for i in range(self.cw):
+                if self.b[j, i] < 0 or seen[j, i]: continue
+                st = [(i, j)]; g = []; seen[j, i] = True
+                while st:
+                    x, y = st.pop(); g.append((x, y))
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        X, Y = x + dx, y + dy
+                        if 0 <= X < self.cw and 0 <= Y < self.ch and not seen[Y, X] and self.b[Y, X] == self.b[j, i]: seen[Y, X] = True; st.append((X, Y))
+                if len(g) >= 3: out.append(g)
+        return out
+    def step(self, dt, kick, hit):
+        self.t += dt; self.tick += dt; self.pt = max(0, self.pt - dt); self.shake = max(0, self.shake - dt)
+        if kick > 0.75 and self.pt <= 0:
+            gs = self.groups()
+            if gs:
+                self.pop = [p for g in gs for p in g]; self.pt = 0.25; self.combo += 1; self.shake = 0.12
+                for x, y in self.pop: self.b[y, x] = -1
+                self.settle()
+            else: self.combo = 0
+        if hit > 0.6 and self.free(self.x + 2, self.y) and self.free(self.x + 2, self.y + 1): self.x += 1
+        if self.tick > 0.09:
+            self.tick = 0
+            if self.free(self.x, self.y + 2) and self.free(self.x + 1, self.y + 2): self.y += 1
+            else:
+                for k, (x, y) in enumerate([(self.x, self.y + 1), (self.x + 1, self.y + 1)]):
+                    if 0 <= y < self.ch: self.b[y, x] = self.pair[k]
+                self.settle()
+                if (self.b[:3] >= 0).sum() > 6: self.b[:6] = -1; self.settle()
+                self.new()
+    def blob(self, x, y, col, flash=False):
+        cx, cy = x + self.c / 2, y + self.c / 2
+        self.circle(cx, cy, self.c / 2 - 1, (255, 255, 255) if flash else col)
+        if not flash: self.circle(cx - 3, cy - 3, 2, (255, 255, 255))
+    def draw(self):
+        self.g[:] = (20, 10, 40); ox, oy = (GW - self.cw * self.c) // 2, GH - self.ch * self.c - 10
+        self.rect(ox - 3, oy - 3, self.cw * self.c + 6, self.ch * self.c + 6, (120, 80, 200)); self.rect(ox, oy, self.cw * self.c, self.ch * self.c, (0, 0, 0))
+        for j in range(self.ch):
+            for i in range(self.cw):
+                if self.b[j, i] >= 0: self.blob(ox + i * self.c, oy + j * self.c, self.COLS[self.b[j, i]])
+        for k, (x, y) in enumerate([(self.x, self.y), (self.x + 1, self.y)]):
+            if 0 <= y < self.ch: self.blob(ox + x * self.c, oy + y * self.c, self.COLS[self.pair[k]])
+        if self.pt > 0:
+            for x, y in self.pop: self.circle(ox + x * self.c + self.c / 2, oy + y * self.c + self.c / 2, self.c * (0.9 - self.pt * 2), (255, 255, 255), fill=False, w=2)
+        for k in range(min(self.combo, 8)): self.circle(10 + k * 14, 14, 5, self.COLS[k % 5])
+        return self.finish()
+
+class Vector(Base):
+    """green-phosphor vector rocks; kick = the ship fires, rocks split; lines only"""
+    def __init__(self, seed):
+        super().__init__(seed); self.rocks = [self.rock(3) for _ in range(5)]; self.shots = []; self.ang = 0
+    def rock(self, size, x=None, y=None):
+        n = 9; rad = [size * 7 * (0.7 + 0.3 * self.r.random()) for _ in range(n)]
+        return {'x': self.r.random() * GW if x is None else x, 'y': self.r.random() * GH if y is None else y, 'vx': self.r.normal(0, 12), 'vy': self.r.normal(0, 12),
+                'a': 0, 'va': self.r.normal(0, 1), 's': size, 'rad': rad}
+    def step(self, dt, kick, hit):
+        self.t += dt; self.ang += dt * 1.4
+        for r in self.rocks: r['x'] = (r['x'] + r['vx'] * dt) % GW; r['y'] = (r['y'] + r['vy'] * dt) % GH; r['a'] += r['va'] * dt
+        if kick > 0.55: self.shots.append([GW / 2, GH / 2, math.cos(self.ang) * 160, math.sin(self.ang) * 160, 0.8])
+        for s in self.shots: s[0] += s[2] * dt; s[1] += s[3] * dt; s[4] -= dt
+        new = []
+        for r in self.rocks:
+            hitr = False
+            for s in self.shots:
+                if (s[0] - r['x']) ** 2 + (s[1] - r['y']) ** 2 < (r['s'] * 7) ** 2: s[4] = 0; hitr = True
+            if hitr and r['s'] > 1: new += [self.rock(r['s'] - 1, r['x'], r['y']) for _ in range(2)]
+            elif not hitr: new.append(r)
+        self.rocks = new if new else [self.rock(3) for _ in range(5)]
+        self.shots = [s for s in self.shots if s[4] > 0]
+    def draw(self):
+        self.g[:] = (0, 8, 0); G = (90, 255, 140)
+        for r in self.rocks:
+            n = len(r['rad']); pts = np.array([[r['x'] + r['rad'][k] * math.cos(r['a'] + k * 6.283 / n), r['y'] + r['rad'][k] * math.sin(r['a'] + k * 6.283 / n)] for k in range(n)], np.int32)
+            cv2.polylines(self.g, [pts], True, G, 1)
+        c, s_ = math.cos(self.ang), math.sin(self.ang); cx, cy = GW / 2, GH / 2
+        ship = np.array([[cx + c * 9, cy + s_ * 9], [cx - c * 6 - s_ * 5, cy - s_ * 6 + c * 5], [cx - c * 3, cy - s_ * 3], [cx - c * 6 + s_ * 5, cy - s_ * 6 - c * 5]], np.int32)
+        cv2.polylines(self.g, [ship], True, (220, 255, 220), 1)
+        for s in self.shots: self.px(s[0], s[1], (220, 255, 220))
+        glow = cv2.GaussianBlur(self.g, (0, 0), 2); self.g = np.clip(self.g.astype(int) + glow.astype(int), 0, 255).astype(np.uint8)
+        return self.finish()
+
+class Climber(Base):
+    """a tiny figure hopping up through floating platforms; each kick is a jump; the world scrolls down"""
+    FIG = [".11.", "1221", ".33.", "3333", ".33.", "3..3"]
+    def __init__(self, seed):
+        super().__init__(seed); self.cam = 0; self.plats = [(self.r.integers(10, GW - 40), GH - 20 - k * 34, self.r.integers(0, 3)) for k in range(30)]
+        self.x, self.y, self.vy = GW / 2, GH - 40, 0; self.best = 0
+    def step(self, dt, kick, hit):
+        self.t += dt; self.vy += 260 * dt; self.y += self.vy * dt
+        tgt = min(self.plats, key=lambda p: abs(p[1] - self.cam - (self.y - 50))); self.x += (tgt[0] + 12 - self.x) * min(1, 2.5 * dt)
+        for px, py, k in self.plats:
+            sy = py - self.cam
+            if self.vy > 0 and px - 4 < self.x < px + 34 and sy - 2 < self.y < sy + 6: self.y = sy; self.vy = 0
+        if kick > 0.6 and self.vy == 0: self.vy = -190
+        if self.y < GH * 0.45: d = GH * 0.45 - self.y; self.cam -= d; self.y += d
+        if self.y > GH + 30: self.y, self.vy = GH * 0.4, 0
+        top = min(p[1] for p in self.plats)
+        self.plats = [p for p in self.plats if p[1] - self.cam < GH + 20]
+        while len(self.plats) < 30: top -= 34; self.plats.append((self.r.integers(10, GW - 40), top, self.r.integers(0, 3)))
+    def draw(self):
+        yy = np.linspace(0, 1, GH)[:, None]; h = (self.cam * -0.001) % 1
+        self.g[:] = (np.stack([20 + 60 * yy, 30 + 50 * (1 - yy), 80 + 40 * yy], -1) * np.ones((GH, GW, 1))).astype(np.uint8)
+        for k in range(30): self.px((k * 41) % GW, (k * 67 - self.cam * 0.3) % GH, (200, 200, 255))
+        for px, py, k in self.plats:
+            sy = py - self.cam; col = [(255, 120, 200), (120, 220, 255), (255, 230, 120)][k]
+            self.rect(px, sy, 30, 4, col); self.rect(px, sy + 4, 30, 2, tuple(v // 2 for v in col))
+        self.sprite(self.x - 4, self.y - 12, self.FIG, {'1': (40, 40, 40), '2': (255, 220, 200), '3': (255, 80, 160)})
+        return self.finish()

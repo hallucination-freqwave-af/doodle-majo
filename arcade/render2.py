@@ -1,6 +1,6 @@
 import numpy as np, cv2, sys, subprocess, os, math, glob
 from PIL import Image, ImageDraw
-from render import (W, H, FPS, kick, hit, beatphase, af, rms, BEAT, strips, invert, swap, mosaic, place, pil_over,
+from render import (W, H, FPS, kick, hit, beatphase, kickpulse, offpulse, af, rms, BEAT, strips, invert, swap, mosaic, place, pil_over,
                     text, cat, speedlines, sun, particles, blank, BLUE, PINK, BLACK, WHITE)
 
 _text = text
@@ -9,7 +9,27 @@ def text(img, s, *a, **k):
     if s.replace(':','').isdigit() or s.startswith('documented'): return _text(img, s, *a, **k)
     return img
 
-POSTERS = [np.array(Image.open(f).convert('RGB')) for f in sorted(glob.glob('posters/*.png'))]
+IMAGES = [np.array(Image.open(f).convert('RGB')) for f in sorted(glob.glob('posters/*.png'))]
+
+class VideoSource:
+    """a clip, cover-cropped to 1080x1350; frame(tl) plays it (ping-pong when shorter than the slot)"""
+    def __init__(self, path):
+        self.cap = cv2.VideoCapture(path); self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
+        self.n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)); self.cache = {}; self.last = -1
+    def frame(self, tl):
+        k = int(tl * self.fps); span = max(1, self.n - 1)
+        cyc = k // span; k = k % span if cyc % 2 == 0 else span - k % span   # ping-pong
+        if k in self.cache: return self.cache[k]
+        if k != self.last + 1: self.cap.set(cv2.CAP_PROP_POS_FRAMES, k)
+        ok, fr = self.cap.read(); self.last = k
+        if not ok: return self.cache.get(self.last - 1, blank(BLACK))
+        fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB); h, w = fr.shape[:2]; s = max(W / w, H / h)
+        fr = cv2.resize(fr, (int(w * s) + 1, int(h * s) + 1)); y0 = (fr.shape[0] - H) // 2; x0 = (fr.shape[1] - W) // 2
+        out = np.ascontiguousarray(fr[y0:y0 + H, x0:x0 + W]); self.cache = {k: out}; return out
+
+CLIPS = {7: 'clips/v1.mp4', 20: 'clips/v2.mp4', 33: 'clips/v3.mp4'}   # where the moving fragments sit
+POSTERS = list(IMAGES)
+for pos in sorted(CLIPS): POSTERS.insert(pos, VideoSource(CLIPS[pos]))
 DUR = 201.9
 NS = len(POSTERS)
 SEG = DUR / NS  # ~13.46s each
@@ -96,14 +116,16 @@ def e03_sever(P, tl, t):  # 時空断線: horizontal tear with time offset; scan
     if hit(t) > 0.6: img = mosaic(img, 10 + 30 * hit(t))
     return text(img, '断　線', 140, (W // 2, 200 + 40 * math.sin(tl * 6)), fill=(230, 255, 180), stroke=8, sfill=(40, 40, 80))
 
-def e04_fateline(P, tl, t):  # ギリギリの運命線: a red line snakes; the poster shrinks to a sliver on the beat and recovers
-    sc = 1.0 - 0.5 * (1 - beatphase(t)) ** 4
-    img = blank((20, 20, 20)); card = cv2.resize(P, (int(W * sc), int(H * sc)))
+def e04_fateline(P, tl, t):  # ギリギリの運命線: every bass drum (ドン・ドンドン) slams the poster small; it swells back between hits
+    p = kickpulse(t, 6.0)
+    sc = 1.0 - 0.45 * p
+    img = blank((20, 20, 20) if p < 0.9 else (255, 40, 60)); card = cv2.resize(P, (int(W * sc), int(H * sc)))
     img = place(img, card, (W - card.shape[1]) // 2, (H - card.shape[0]) // 2)
     def fn(d, im):
-        pts = [(x, H * 0.75 + 120 * math.sin(x / 90 + tl * 5) + 60 * math.sin(x / 23 - tl * 9)) for x in range(0, W + 20, 20)]
-        d.line(pts, fill=(255, 40, 60), width=14)
-    return glitch_common(pil_over(img, fn), t)
+        amp = 60 + 120 * p
+        pts = [(x, H * 0.75 + amp * math.sin(x / 90 + t * 5) + 40 * math.sin(x / 23 - t * 9)) for x in range(0, W + 20, 20)]
+        d.line(pts, fill=(255, 40, 60), width=int(10 + 14 * p))
+    return pil_over(img, fn)
 
 def e05_denpa(P, tl, t):  # 電波: concentric waves + static; 呪詛 rain
     img = P.copy()
@@ -275,26 +297,19 @@ def e14_map(P, tl, t):  # 未来の地図: rainbow rays; the card brightens from
         if pts: cat(d, pts[-1][0], pts[-1][1] - 40, 40, (0, 0, 0), run=tl)
     return pil_over(img, path)
 
-def e15_pika(P, tl, t):  # ピカッ: lightning flashes (white frames + bolts), then breaker trips -> black, calm
-    img = P.copy()
-    h = hit(t)
-    if tl > SEG*0.72:  # breaker tripped
-        img = blank(BLACK)
-        if int(tl * 3) % 5 == 0: img = text(img, 'ブレーカー落ちた', 70, (W // 2, H // 2), fill=(90, 90, 90))
-        if tl > SEG*0.88: img = text(img, '冷静すぎるふたり', 60, (W // 2, H // 2 + 120), fill=(255, 220, 0))
-        return img
-    if h > 0.7:
-        img = invert(img) if int(t * 30) % 2 else blank(WHITE)
-        def bolt(d, im):
+def e15_pika(P, tl, t):  # ピカッと狂う夜: every bass drum is a flash of lightning — white, bolts, the poster blazing, then it settles
+    p = kickpulse(t, 9.0)
+    img = np.clip(P.astype(np.float32) * (0.85 + 1.3 * p) + 60 * p, 0, 255).astype(np.uint8)
+    if p > 0.8: img = blank(WHITE) if int(t * 30) % 2 else invert(img)
+    def bolt(d, im):
+        if p > 0.25:
             r = np.random.default_rng(int(t * 30))
-            for _ in range(3):
+            for _ in range(2 + int(3 * p)):
                 x = r.integers(100, W - 100); pts = [(x, 0)]
                 for y in range(0, H, 80): x += r.integers(-90, 90); pts.append((x, y))
-                d.line(pts, fill=(255, 220, 0), width=16); d.line(pts, fill=(255, 255, 255), width=5)
-        img = pil_over(img, bolt)
-    img = shake(img, int(30 * kick(t)), t)
-    if int(tl * 4) % 6 == 5: img = text(img, 'ピカッ', 170, (W // 2, 300), fill=(255, 220, 0), stroke=10, sfill=(0, 0, 0), angle=10 * math.sin(tl * 9))
-    return img
+                d.line(pts, fill=(255, 220, 0), width=int(6 + 14 * p)); d.line(pts, fill=(255, 255, 255), width=int(2 + 5 * p))
+    img = pil_over(img, bolt)
+    return shake(img, int(30 * p), t) if p > 0.3 else img
 
 def e16_free(P, tl, t):  # 自由気ままん: cranes fly; the poster drifts wherever it likes (position only), brush ring spins
     img = blank((255, 170, 220) if int(tl * 2) % 2 else (120, 230, 240))
@@ -392,11 +407,11 @@ def e21_wink(P, tl, t):  # eyelid closes/opens over the poster; dotted line runs
             d.rectangle([x, 590, x + 50, 630], fill=(255, 150, 220))
     return glitch_common(pil_over(img, fn), t)
 
-def e22_skew(P, tl, t):  # mute_wink (pink): silence = grey and still; each kick is the wink, a flash of full colour
+def e22_skew(P, tl, t):  # mute_wink (pink): on the bass drum it snaps to full colour, on the 裏 it goes soft (blur)
     g = cv2.cvtColor(P, cv2.COLOR_RGB2GRAY)[..., None].repeat(3, 2)
-    k = kick(t)
-    img = cv2.addWeighted(P, k, g, 1 - k, 0) if k > 0.55 else g
-    if beatphase(t) < 0.08 and k > 0.75: img = P.copy()
+    p = kickpulse(t, 5.0); o = offpulse(t, 8.0)
+    img = cv2.addWeighted(P, p, g, 1 - p, 0)
+    if o > 0.05: img = blur(img, 1 + 2 * int(14 * o))
     return img
 
 def e23_melt(P, tl, t):  # ガーン: it drops from the top, hits the floor, shrinks on impact, bounces smaller each time
@@ -498,16 +513,21 @@ def e32_static(P, tl, t):  # 静電気中毒: every hit is a バチッ — white
     if h > 0.85: img = blank(WHITE) if int(t * 30) % 2 else invert(img)
     return img
 
-def e33_shutter(P, tl, t):  # ピカッと狂う夜 (2): night — dark, lit only by the flashes
-    img = (P * 0.15).astype(np.uint8); h = hit(t)
-    if h > 0.55: img = (np.clip(P.astype(np.float32) * (0.15 + 1.2 * h), 0, 255)).astype(np.uint8)
+def e33_shutter(P, tl, t):  # ピカッと狂う夜 (2): the night lit by the drum — each hit blazes, colour zigzags crackle down
+    p = kickpulse(t, 8.0)
+    img = np.clip(P.astype(np.float32) * (0.55 + 1.1 * p) + 40 * p, 0, 255).astype(np.uint8)
+    if p > 0.85 and int(t * 30) % 2: img = blank(WHITE)
     def fn(d, im):
-        if h > 0.7:
-            r = np.random.default_rng(int(t * 30))
-            for i in range(3):
-                x = r.integers(100, W - 100); pts = [(x, 0)]
-                for y in range(0, H, 80): x += r.integers(-90, 90); pts.append((x, y))
-                d.line(pts, fill=(255, 220, 0), width=12)
+        r = np.random.default_rng(33)
+        for i in range(5):
+            x = 150 + i * 200; pts = [(x + (60 if k % 2 else -60), (k * 110 + t * 300) % (H + 200) - 100) for k in range(14)]
+            d.line(pts, fill=[(255, 120, 0), (0, 200, 120), (230, 60, 200), (255, 220, 0), (120, 160, 255)][i], width=int(4 + 12 * p))
+        if p > 0.3:
+            rr = np.random.default_rng(int(t * 30))
+            for _ in range(3):
+                x = rr.integers(100, W - 100); q = [(x, 0)]
+                for y in range(0, H, 90): x += rr.integers(-80, 80); q.append((x, y))
+                d.line(q, fill=(255, 255, 255), width=int(3 + 8 * p))
     return pil_over(img, fn)
 
 def e34_spotlight(P, tl, t):  # headlight sweep over a dark poster
@@ -537,9 +557,9 @@ def e35_jelly(P, tl, t):  # 悲しみの指数: an index meter climbs with the t
     return pil_over(img, fn)
 
 def e36_roulette(P, tl, t):  # finale: every poster flickers past on the beat, slows, lands on this one
-    n = len(POSTERS); rate = 24 * max(0.08, 1 - tl / (SEG * 0.85))
+    n = len(IMAGES); rate = 24 * max(0.08, 1 - tl / (SEG * 0.85))
     if tl < SEG * 0.85:
-        idx = int(tl * rate) % n; img = POSTERS[idx]
+        idx = int(tl * rate) % n; img = IMAGES[idx]
         return invert(img) if hit(t) > 0.85 else img
     img = P.copy()
     if hit(t) > 0.7: img = invert(img)
@@ -548,12 +568,29 @@ def e36_roulette(P, tl, t):  # finale: every poster flickers past on the beat, s
 TRICKS += [e21_wink, e22_skew, e23_melt, e24_blinds, e25_spin_drip, e26_eq, e27_ribbon, e28_parallel, e29_strobe, e30_lens,
            e31_blocks, e32_static, e33_shutter, e34_spotlight, e35_jelly, e36_roulette]
 
+def e_video(V, tl, t):  # a fragment that already moves: play it, let the colour thread touch it, blink white on the hardest hits
+    img = V.frame(tl)
+    if hit(t) > 0.8: img = swap(img, [[2, 0, 1], [1, 2, 0], [0, 2, 1]][int(t * 13) % 3])
+    if kick(t) > 0.92 and int(t * 30) % 2: img = np.clip(img.astype(int) + 90, 0, 255).astype(np.uint8)
+    return img
+
 def scene_frame(i, tl, t):
-    return np.ascontiguousarray(TRICKS[i](POSTERS[i], tl, t))
+    src = POSTERS[i]
+    if isinstance(src, VideoSource): return np.ascontiguousarray(e_video(src, tl, t))
+    j = i - sum(1 for p in CLIPS if p < i)   # index among the still posters
+    return np.ascontiguousarray(TRICKS[j](src, tl, t))
+
+# the 裏 blur, dropped on top of whatever a scene is already doing: about a third of the scenes, and inside them only some bars
+_br = np.random.default_rng(22)
+BLUR_SCENES = {3, 22}  # ベイビーの聖戦 and the first 無言のウィンク (the second has its own)
+def ura_blur(img, i, t):
+    if i not in BLUR_SCENES or int(t / BEAT / 2) % 3 == 0: return img
+    o = offpulse(t, 8.0)
+    return blur(img, 1 + 2 * int(14 * o)) if o > 0.05 else img
 
 def frame(t):
     i = min(NS - 1, int(t / SEG)); a = i * SEG; tl = t - a
-    img = scene_frame(i, tl, t)
+    img = ura_blur(scene_frame(i, tl, t), i, t)
     if i > 0 and tl < 0.35:  # 0.35s crossfade from previous
         pimg = scene_frame(i - 1, SEG - 0.001, a - 0.001); w = tl / 0.35
         img = cv2.addWeighted(img, w, pimg, 1 - w, 0)
