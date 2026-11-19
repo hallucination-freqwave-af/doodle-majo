@@ -4,8 +4,9 @@ import render2 as R
 from games import GAMES as OLD, GW as OGW, GH as OGH
 from games16 import Shooter16, TetrisSpin, Racer, Blobs, Vector, Climber, GW, GH
 from races import RACES
-from screens import SCREENS
+from screens import SCREENS, Shapes
 from render import kick, hit
+import math
 import dance
 import special
 
@@ -50,9 +51,12 @@ for _i in range(60):
     if mode == 'chunky' and (a.startswith(('ps1', 'rain')) or b.startswith(('ps1', 'rain'))): mode = 'plain'
     SCHED.append((a, b, mode, int(_r.integers(0, 3)))); prev = (a, b)
 
-SCHED[30] = ('tank', 'ecg', 'plain', 0)   # 21 already has bars + ecg
+SCHED[30] = ('tank', 'ecg', 'plain', 0)
+SCHED[12] = ('shapes', 'shapes', 'plain', 0)
+SCHED[13] = (SCHED[13][0], SCHED[13][1], 'tint', 2)      # 1:10: both side screens in pink   # 1:04-1:10: grey paper with small geometric figures, both sides (each its own scatter)   # 21 already has bars + ecg
 
 def make(kind, seed, scene, left):
+    if kind == 'shapes': g = Shapes(seed); return g, g.px
     if kind in SCREENS: g = SCREENS[kind](seed); return g, g.px
     if kind in RACES: g = RACES[kind](seed); return g, g.px
     if kind == 'shoot': return Shooter16(seed, stage=Shooter16.STAGES[(scene + (0 if left else 1)) % 3]), PX
@@ -106,19 +110,45 @@ if __name__ == '__main__':
     CFR = 30 if i in (3, 23, 15, 35, 10) else (15 if i in R.BLUR_SCENES else [8, 4, 15, 6, 12, 4, 10, 8, 5][i % 9])  # 30 where the 裏 blur lives, else low; centre frame rate for this scene; sides stay at 30
     last_q, cen = None, None
     # warm the games up a little so they don't start empty
-    for _ in range(60): L.game.step(1 / 30, 0, 0); Rr.game.step(1 / 30, 0, 0)
+    if i not in special.EARLY:
+        for _ in range(60): L.game.step(1 / 30, 0, 0); Rr.game.step(1 / 30, 0, 0)
     p = subprocess.Popen(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{OW}x{OH}', '-r', str(FPS), '-i', '-',
                           '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', tmp], stdin=subprocess.PIPE)
+    EARLY_NEXT = special.EARLY.get(i + 1)   # the next scene cuts in before this one's slot is over
+    if EARLY_NEXT:
+        Ln = Side(i + 1, True); Rn = Side(i + 1, False, partner=Ln); Ln.t0 = Rn.t0 = EARLY_NEXT
+        for _ in range(60): Ln.game.step(1 / 30, 0, 0); Rn.game.step(1 / 30, 0, 0)
+    if i in special.EARLY:                  # ...and here it is already under way: bring its side screens up to where they were
+        L.t0 = Rr.t0 = special.EARLY[i]
+        for _ in range(60): L.game.step(1 / 30, 0, 0); Rr.game.step(1 / 30, 0, 0)
+        for kk in range(int(math.ceil(special.EARLY[i] * FPS)), n0): L.frame(kk / FPS, 1 / FPS); Rr.frame(kk / FPS, 1 / FPS)
+    HOLD = special.GEO_AT.get(i) if i == 16 else None          # this scene starts late, on a bass drum: until then the previous scene keeps running
+    if HOLD:
+        Lp = Side(i - 1, True); Rp = Side(i - 1, False, partner=Lp)
+        for _ in range(60): Lp.game.step(1 / 30, 0, 0); Rp.game.step(1 / 30, 0, 0)
+        for kk in range(int(round((i - 1) * R.SEG * FPS)), n0): Lp.frame(kk / FPS, 1 / FPS); Rp.frame(kk / FPS, 1 / FPS)
     for k in range(n0, n1):
         t = k / FPS
+        if EARLY_NEXT and t >= EARLY_NEXT:
+            fr = special.geo(compose(R.scene_frame(i + 1, t - EARLY_NEXT, t), Ln.frame(t, 1 / FPS), Rn.frame(t, 1 / FPS)), t)
+            if not special._sh.get('ready'): special.shatter_init(cv2.resize(cen, (CW, OH), interpolation=cv2.INTER_AREA))
+            fr = special.shatter(fr, t, EARLY_NEXT)
+            if t - EARLY_NEXT < 0.06: fr = np.clip(fr.astype(np.int16) + 90, 0, 255).astype(np.uint8)
+            p.stdin.write(np.ascontiguousarray(fr).tobytes()); continue
+        if HOLD and t < HOLD:
+            fr = special.geo(compose(R.scene_frame(i - 1, t - (i - 1) * R.SEG, t), Lp.frame(t, 1 / FPS), Rp.frame(t, 1 / FPS)), t)
+            L.game.step(1 / FPS, 0, 0); Rr.game.step(1 / FPS, 0, 0)
+            p.stdin.write(np.ascontiguousarray(fr).tobytes()); continue
         q = int(t * CFR)
         if q != last_q:
-            if i in (6, 7, 20, 33, 27, 28): cen = np.zeros((1350, 1080, 3), np.uint8)          # taken over (special.takeover)
-            elif i == 16: cen = special.free_bg()                              # the poster has left (special.free)
-            elif i in (8, 21, 34, 29) and q / CFR - a < 0.4: cen = R.scene_frame(i, max(0, q / CFR - a), q / CFR)   # hard cut in: what came before is gone
+            if i in (6, 7, 20, 33, 27, 28, 36, 37, 38, 30): cen = np.zeros((1350, 1080, 3), np.uint8)          # taken over (special.takeover)
+            elif i in (16, 17): cen = np.zeros((1350, 1080, 3), np.uint8)
+            elif i == 29: cen = special.danzen_poster()                        # 時空断線 (special.danzen)                              # the poster has left (special.free)
+            elif i in (8, 21, 34, 31, 9, 11, 14, 35, 23, 18) and q / CFR - a < 0.4: cen = R.scene_frame(i, max(0, q / CFR - a), q / CFR)   # hard cut in: what came before is gone
             else: cen = R.frame(q / CFR)
             last_q = q
         fr = special.post(compose(cen, L.frame(t, 1 / FPS), Rr.frame(t, 1 / FPS)), t, i)
+        if EARLY_NEXT: fr = special.cracks(fr, t, EARLY_NEXT)
         fr = dance.overlay(fr, t)
         if t > R.DUR - 2.5: fr = (fr * max(0, (R.DUR - t) / 2.5)).astype(np.uint8)
         p.stdin.write(np.ascontiguousarray(fr).tobytes())
