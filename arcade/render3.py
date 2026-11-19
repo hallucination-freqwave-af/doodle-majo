@@ -4,8 +4,10 @@ import render2 as R
 from games import GAMES as OLD, GW as OGW, GH as OGH
 from games16 import Shooter16, TetrisSpin, Racer, Blobs, Vector, Climber, GW, GH
 from races import RACES
+from screens import SCREENS
 from render import kick, hit
 import dance
+import special
 
 OW, OH, FPS = 1920, 1080, 30
 CW = 864; SW = (OW - CW) // 2  # 528
@@ -24,19 +26,34 @@ def _next_race(avoid):
         k = str(_races.pop())
         if k not in avoid: return k
     return k
+# 2026-11-19: the side screens are no longer only games. Cars stay the backbone; next to them, screens nobody is playing.
+SCREEN_KEYS = list(SCREENS); _scr = []
+def _next_screen(avoid):
+    global _scr
+    for _ in range(40):
+        if not _scr: _scr = list(_r.permutation(SCREEN_KEYS))
+        k = str(_scr.pop())
+        if k not in avoid: return k
+    return k
 SCHED = []; prev = ()
 for _i in range(60):
     roll = _r.random()
-    if roll < 0.45: a, b = _next_race(prev), None; b = _next_race(prev + (a,))       # car + car
-    elif roll < 0.85:                                                                  # car + something else
-        a = _next_race(prev); b = str(_r.choice([o for o in OTHERS if o not in prev]))
-        if _r.random() < 0.5: a, b = b, a
-    else: a = str(_r.choice(OTHERS)); b = str(_r.choice([o for o in OTHERS if o != a]))
-    mode = MODES[_r.integers(0, len(MODES))]
+    if roll < 0.42: a, b = _next_race(prev), _next_screen(prev)                              # a car and a screen left on
+    elif roll < 0.60: a, b = str(_r.choice([o for o in OTHERS if o not in prev])), _next_screen(prev)   # a game and a screen
+    elif roll < 0.78: a = _next_screen(prev); b = _next_screen(prev + (a,))                 # two screens, nobody home
+    elif roll < 0.90: a = _next_race(prev); b = _next_race(prev + (a,))                     # car + car
+    else: a, b = _next_race(prev), str(_r.choice([o for o in OTHERS if o not in prev]))      # car + game
+    if _r.random() < 0.5: a, b = b, a
+    mode = 'plain'
+    if a not in SCREENS and b not in SCREENS: mode = MODES[_r.integers(0, len(MODES))]
+    elif a not in SCREENS and _r.random() < 0.15: mode = 'mirror'                            # mirror = the left one twice, its own run each side
     if mode == 'chunky' and (a.startswith(('ps1', 'rain')) or b.startswith(('ps1', 'rain'))): mode = 'plain'
     SCHED.append((a, b, mode, int(_r.integers(0, 3)))); prev = (a, b)
 
+SCHED[30] = ('tank', 'ecg', 'plain', 0)   # 21 already has bars + ecg
+
 def make(kind, seed, scene, left):
+    if kind in SCREENS: g = SCREENS[kind](seed); return g, g.px
     if kind in RACES: g = RACES[kind](seed); return g, g.px
     if kind == 'shoot': return Shooter16(seed, stage=Shooter16.STAGES[(scene + (0 if left else 1)) % 3]), PX
     if kind == 'tetris': return TetrisSpin(seed), PX
@@ -57,6 +74,7 @@ class Side:
             self.game, self.px = make(a if left else b, scene * 7 + (1 if left else 2), scene, left)
         self.t0 = scene * R.SEG
     def frame(self, t, dt):
+        if hasattr(self.game, 'set_time'): self.game.set_time(t)
         self.game.step(dt, kick(t), hit(t))
         g = self.game.draw()
         if self.mode == 'chunky': g = cv2.resize(cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2), interpolation=cv2.INTER_AREA), (g.shape[1], g.shape[0]), interpolation=cv2.INTER_NEAREST)
@@ -85,7 +103,7 @@ if __name__ == '__main__':
     n0, n1 = int(round(a * FPS)), int(round(b * FPS))
     out = f'v3_scene{i:02d}.mp4'; tmp = f'tmp_v3_{i:02d}.mp4'
     L = Side(i, True); Rr = Side(i, False, partner=L)
-    CFR = 30 if i in (3, 23, 15, 35) else (15 if i in R.BLUR_SCENES else [8, 4, 15, 6, 12, 4, 10, 8, 5][i % 9])  # 30 where the 裏 blur lives, else low; centre frame rate for this scene; sides stay at 30
+    CFR = 30 if i in (3, 23, 15, 35, 10) else (15 if i in R.BLUR_SCENES else [8, 4, 15, 6, 12, 4, 10, 8, 5][i % 9])  # 30 where the 裏 blur lives, else low; centre frame rate for this scene; sides stay at 30
     last_q, cen = None, None
     # warm the games up a little so they don't start empty
     for _ in range(60): L.game.step(1 / 30, 0, 0); Rr.game.step(1 / 30, 0, 0)
@@ -94,8 +112,14 @@ if __name__ == '__main__':
     for k in range(n0, n1):
         t = k / FPS
         q = int(t * CFR)
-        if q != last_q: cen = R.frame(q / CFR); last_q = q
-        fr = dance.overlay(compose(cen, L.frame(t, 1 / FPS), Rr.frame(t, 1 / FPS)), t)
+        if q != last_q:
+            if i in (6, 7, 20, 33, 27, 28): cen = np.zeros((1350, 1080, 3), np.uint8)          # taken over (special.takeover)
+            elif i == 16: cen = special.free_bg()                              # the poster has left (special.free)
+            elif i in (8, 21, 34, 29) and q / CFR - a < 0.4: cen = R.scene_frame(i, max(0, q / CFR - a), q / CFR)   # hard cut in: what came before is gone
+            else: cen = R.frame(q / CFR)
+            last_q = q
+        fr = special.post(compose(cen, L.frame(t, 1 / FPS), Rr.frame(t, 1 / FPS)), t, i)
+        fr = dance.overlay(fr, t)
         if t > R.DUR - 2.5: fr = (fr * max(0, (R.DUR - t) / 2.5)).astype(np.uint8)
         p.stdin.write(np.ascontiguousarray(fr).tobytes())
     p.stdin.close(); rc = p.wait()
