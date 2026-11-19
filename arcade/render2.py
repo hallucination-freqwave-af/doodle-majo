@@ -265,21 +265,32 @@ def e12_dream2(P, tl, t):  # 夢感覚移動 (2): 4-panel shuffle / galaxy rain 
     if kick(t) > 0.8: img = mosaic(img, 20)
     return img
 
-def e13_car(P, tl, t):  # baby in car: horizontal rush, motion blur strips, road lines, honk
-    img = P.copy()
-    img = strips(img, 30, int(10 + 90 * kick(t)), t)
-    k = 1 + int(40 * af(rms, t))
-    img = cv2.blur(img, (k * 2 + 1, 1))
-    img = speedlines(img, 60, t, color=(255, 255, 255), alpha=160)
-    def fn(d, im):
-        for i in range(8):
-            x = (tl * 900 + i * 300) % (W + 300) - 150
-            d.rectangle([x, H - 90, x + 140, H - 70], fill=(255, 255, 0))
-        d.rectangle([0, H - 60, W, H], fill=(40, 40, 40))
-    img = pil_over(img, fn)
-    if hit(t) > 0.7: img = text(img, 'プァーン', 110, (W // 2 + 200 * math.sin(tl * 7), 150), fill=(255, 120, 220), stroke=8, angle=-15)
-    if int(tl / 3) % 2: img = np.roll(img, int(((tl * 500) % W)), axis=1)  # the whole street scrolls
-    return img
+def e13_car(P, tl, t):  # baby in car: no glitch — the poster itself drives. Pink sky, clouds going by, a road under it; it changes lane on every bass drum
+    from render import KICKS
+    img = blank((255, 150, 210)); a0 = t - tl; ks = KICKS[(KICKS >= a0) & (KICKS <= t)]; n = len(ks)
+    lanes = [W * 0.5, W * 0.36, W * 0.64, W * 0.5, W * 0.3, W * 0.7]; cur = lanes[n % len(lanes)]; prev = lanes[(n - 1) % len(lanes)] if n else cur
+    e = min(1.0, (t - ks[-1]) / 0.18) if n else 1.0; e = 0.5 - 0.5 * math.cos(e * math.pi); cx = prev + (cur - prev) * e
+    sp = 700 + 1500 * kickpulse(t, 3.0)
+    def scene(d, im):
+        r = np.random.default_rng(13)
+        for k in range(9):                                  # clouds and little hearts drift past behind it
+            x = (r.integers(0, W + 400) - tl * (120 + k * 40)) % (W + 400) - 200; y = 90 + k * 95; s_ = 40 + r.integers(0, 50)
+            if k % 3: 
+                for dx, rr in ((0, 1.0), (s_ * 0.9, 0.75), (-s_ * 0.9, 0.7)): d.ellipse([x + dx - s_ * rr, y - s_ * rr * 0.6, x + dx + s_ * rr, y + s_ * rr * 0.6], fill=(255, 255, 255))
+            else: d.polygon([(x, y + s_ * 0.6), (x - s_ * 0.6, y - s_ * 0.1), (x - s_ * 0.3, y - s_ * 0.5), (x, y - s_ * 0.2), (x + s_ * 0.3, y - s_ * 0.5), (x + s_ * 0.6, y - s_ * 0.1)], fill=(255, 90, 170))
+        d.rectangle([0, H - 210, W, H], fill=(60, 50, 70)); d.rectangle([0, H - 216, W, H - 206], fill=(255, 255, 255))
+        for k in range(8):                                  # the centre line rushes by
+            x = (k * 260 - tl * sp) % (W + 260) - 130; d.rectangle([x, H - 112, x + 150, H - 96], fill=(255, 230, 90))
+        for k in range(14):                                 # thin wind lines
+            y = 60 + (k * 83) % (H - 320); x = (k * 311 - tl * sp * 1.3) % (W + 500) - 250; d.line([(x, y), (x + 180 + k * 12, y)], fill=(255, 255, 255, 170), width=3)
+    img = pil_over(img, scene)
+    sc = 0.78; card = cv2.resize(P, (int(W * sc), int(H * sc)), interpolation=cv2.INTER_AREA); bob = int(10 * abs(math.sin(t * 9))) + int(26 * kickpulse(t, 9.0))
+    x0 = int(cx - card.shape[1] / 2); y0 = H - 150 - card.shape[0] - bob
+    def under(d, im):                                       # shadow and wheels, so it sits on the road
+        d.ellipse([x0 + 40, H - 175, x0 + card.shape[1] - 40, H - 125], fill=(30, 25, 40))
+        for wx in (x0 + 150, x0 + card.shape[1] - 150): d.ellipse([wx - 62, H - 205 - bob // 2, wx + 62, H - 81 - bob // 2], fill=(20, 20, 26)); d.ellipse([wx - 22, H - 165 - bob // 2, wx + 22, H - 121 - bob // 2], fill=(230, 230, 235))
+    img = pil_over(img, under)
+    return place(img, card, x0, y0)
 
 def e14_map(P, tl, t):  # 未来の地図: rainbow rays; the card brightens from dark as the path gets drawn
     img = blank((90, 170, 230))
@@ -574,7 +585,9 @@ def e_video(V, tl, t):  # a fragment that already moves: play it, let the colour
     if kick(t) > 0.92 and int(t * 30) % 2: img = np.clip(img.astype(int) + 90, 0, 255).astype(np.uint8)
     return img
 
+REMAP = {18: 17, 19: 18, 21: 19}      # 2026-11-19: a clip took slots 16-17, so these posters moved one place later (the kaleidoscope poster dropped out)
 def scene_frame(i, tl, t):
+    i = REMAP.get(i, i)
     src = POSTERS[i]
     if isinstance(src, VideoSource): return np.ascontiguousarray(e_video(src, tl, t))
     j = i - sum(1 for p in CLIPS if p < i)   # index among the still posters

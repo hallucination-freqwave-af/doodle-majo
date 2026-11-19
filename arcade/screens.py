@@ -338,3 +338,34 @@ if __name__ == '__main__':
         assert fr.shape[1] * o.px == 528 and fr.shape[0] * o.px == 1080, (name, fr.shape)
         ims.append(Image.fromarray(cv2.resize(fr, (264, 540), interpolation=cv2.INTER_NEAREST if o.px > 2 else cv2.INTER_AREA)))
     sh = Image.new('RGB', (264 * 7, 540 * 2)); [sh.paste(im, ((k % 7) * 264, (k // 7) * 540)) for k, im in enumerate(ims)]; sh.save('screens.jpg', quality=88); print(len(ims), 'ok')
+
+
+class Shapes(Scr):
+    """grey paper scattered with small geometric figures; they drift, and turn a notch on every bass drum"""
+    W, H, px = 264, 540, 2
+    PAL = [(255, 120, 200), (0, 190, 220), (255, 215, 0), (40, 40, 48), (255, 255, 255), (255, 90, 60), (150, 120, 230)]
+    def init(self):
+        r = self.r; self.s = [[r.uniform(0, self.W), r.uniform(0, self.H), r.uniform(-4, 4), r.uniform(-5, 5), int(r.integers(0, 8)), r.uniform(5, 13), r.uniform(0, 6.28), int(r.integers(0, len(self.PAL)))] for _ in range(95)]
+        self.turn = 0; self.since = 9.0
+    def tick(self, dt, kick, hit):
+        self.since += dt
+        if kick > 0.6 and self.since > 0.18: self.turn += 1; self.since = 0.0
+        for s in self.s: s[0] = (s[0] + s[2] * dt) % self.W; s[1] = (s[1] + s[3] * dt) % self.H
+    def draw(self):
+        g = self.g; g[:] = (198, 198, 203); ink = (40, 40, 48)
+        for x in range(0, self.W, 12):
+            for y in range(0, self.H, 12): g[y, x] = (170, 170, 176)
+        for k, (x, y, vx, vy, kind, sz, ang, ci) in enumerate(self.s):
+            a = ang + (self.turn + (k % 3)) * 0.52 + 0.5 * math.exp(-self.since * 9) * (1 if k % 2 else -1); col = self.PAL[ci]; x, y, sz = float(x), float(y), float(sz)
+            P = lambda r_, th: (int(x + r_ * math.cos(a + th)), int(y + r_ * math.sin(a + th)))
+            if kind == 0: pts = np.array([P(sz, 0), P(sz, 2.094), P(sz, 4.189)], np.int32); cv2.fillPoly(g, [pts], col); cv2.polylines(g, [pts], True, ink, 1, cv2.LINE_AA)
+            elif kind == 1: cv2.circle(g, (int(x), int(y)), int(sz * 0.7), col, -1, cv2.LINE_AA); cv2.circle(g, (int(x), int(y)), int(sz * 0.7), ink, 1, cv2.LINE_AA)
+            elif kind == 2: pts = np.array([P(sz, 0.785), P(sz, 2.356), P(sz, 3.927), P(sz, 5.498)], np.int32); cv2.fillPoly(g, [pts], col); cv2.polylines(g, [pts], True, ink, 1, cv2.LINE_AA)
+            elif kind == 3: cv2.line(g, P(sz, 0), P(sz, 3.1416), ink, 2, cv2.LINE_AA); cv2.line(g, P(sz, 1.5708), P(sz, 4.7124), ink, 2, cv2.LINE_AA)
+            elif kind == 4: cv2.polylines(g, [np.array([(int(x + (j - 3) * sz * 0.5 * math.cos(a) - (sz * 0.4 if j % 2 else -sz * 0.4) * math.sin(a)), int(y + (j - 3) * sz * 0.5 * math.sin(a) + (sz * 0.4 if j % 2 else -sz * 0.4) * math.cos(a))) for j in range(7)], np.int32)], False, col if ci != 4 else ink, 2, cv2.LINE_AA)
+            elif kind == 5: cv2.circle(g, (int(x), int(y)), int(sz * 0.8), col if ci != 4 else ink, 2, cv2.LINE_AA)
+            elif kind == 6:
+                for i in range(3):
+                    for j in range(3): cv2.circle(g, (int(x + (i - 1) * 5), int(y + (j - 1) * 5)), 1, ink, -1)
+            else: cv2.ellipse(g, (int(x), int(y)), (int(sz), int(sz)), math.degrees(a), 0, 180, col, -1, cv2.LINE_AA); cv2.ellipse(g, (int(x), int(y)), (int(sz), int(sz)), math.degrees(a), 0, 180, ink, 1, cv2.LINE_AA)
+        return g
