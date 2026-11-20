@@ -5,6 +5,7 @@ from games import GAMES as OLD, GW as OGW, GH as OGH
 from games16 import Shooter16, TetrisSpin, Racer, Blobs, Vector, Climber, GW, GH
 from races import RACES
 from screens import SCREENS, Shapes
+from patterns import PATTERNS
 from render import kick, hit
 import math
 import dance
@@ -55,7 +56,33 @@ SCHED[30] = ('tank', 'ecg', 'plain', 0)
 SCHED[12] = ('shapes', 'shapes', 'plain', 0)
 SCHED[13] = (SCHED[13][0], SCHED[13][1], 'tint', 2)      # 1:10: both side screens in pink   # 1:04-1:10: grey paper with small geometric figures, both sides (each its own scatter)   # 21 already has bars + ecg
 
+# 2026-11-20: cars and games only now and then. Mostly patterns; some of the screens nobody is watching. The ball-game scenes, the grey shapes and the pink one stay.
+KEEP = {2, 9, 31, 12, 13}
+_r2 = np.random.default_rng(20); _deck = []
+def _pat(avoid):
+    global _deck
+    for _ in range(60):
+        if not _deck: _deck = list(_r2.permutation([k for k in PATTERNS if k not in ('arcbeat', 'prism')] * 4 + ['arcbeat'] * 4 + ['prism'] * 2 + ['shapes'] * 2))
+        k = str(_deck.pop())
+        if k not in avoid: return k
+    return k
+_prev = ()
+for _i in range(60):
+    if _i in KEEP: _prev = SCHED[_i][:2]; continue
+    roll = _r2.random(); mode = 'plain'
+    if roll < 0.45:
+        a = _pat(_prev); b = _pat(_prev + (a,))
+        if _r2.random() < 0.35: mode = 'mirror'            # the same pattern both sides, each its own run
+    elif roll < 0.75: a, b = _pat(_prev), _next_screen(_prev)
+    elif roll < 0.85: a = _next_screen(_prev); b = _next_screen(_prev + (a,))
+    else: a, b = (_next_race(_prev) if _r2.random() < 0.7 else str(_r2.choice(OTHERS))), _pat(_prev)
+    if mode != 'mirror' and _r2.random() < 0.5: a, b = b, a
+    SCHED[_i] = (a, b, mode, 0); _prev = (a, b)
+
+SCHED[0] = ('ps1_97', 'tank', 'plain', 0); SCHED[1] = ('ecg', 'tetris', 'plain', 0)      # the opening, through the second picture, stays as it was
+
 def make(kind, seed, scene, left):
+    if kind in PATTERNS: g = PATTERNS[kind](seed); return g, g.px
     if kind == 'shapes': g = Shapes(seed); return g, g.px
     if kind in SCREENS: g = SCREENS[kind](seed); return g, g.px
     if kind in RACES: g = RACES[kind](seed); return g, g.px

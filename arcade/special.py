@@ -672,6 +672,7 @@ def _zoomc(f, s, w=OW, h=OH):                         # crop round her, at scale
 _jg = {}
 def juggle(fr, t):
     if not (JG_A <= t < JG_B): return fr
+    if t >= JG_DRINK: return bloom(fr, t)
     if 'c' not in _jg: _jg['c'] = Clip('clips/sd6.mp4'); _jg['d'] = Clip('clips/sd7.mp4')
     c = _jg['c'] if t < JG_HALF else _jg['d']; ks = kicks_in(JG_A - 0.05, t); n = max(0, len(ks) - 1); look = JG_LOOK[n % len(JG_LOOK)]; since = t - (ks[-1] if len(ks) else JG_A)
     src = (t - JG_A) / (JG_HALF - JG_A) * 7.0 if t < JG_HALF else 3.0 + (t - JG_HALF) / (JG_B - JG_HALF) * 9.5      # first half of one take, then the busiest stretch of the other
@@ -777,4 +778,40 @@ def dancer2(base, t):
     else:                                                                     # back in her frame; the games return
         out = base.copy(); out[:, C] = wd[idx(t)][:, C]
     if since < 0.06: out = np.clip(out.astype(np.int16) + 90, 0, 255).astype(np.uint8)
+    return _lines(out)
+
+
+# ---------------------------------------------------------------- 1:32  she leans on the wall with a drink (seconds 8-15 of the take), 4 frames a second
+JG_DRINK = 90.26
+def drink(fr, t):
+    if 'k' not in _jg: _jg['k'] = Clip('clips/sd9.mp4')
+    c = _jg['k']; ks = kicks_in(JG_DRINK - 0.05, t); n = max(0, len(ks) - 1); k0 = float(ks[-1]) if len(ks) else JG_DRINK; since = t - k0
+    S = lambda tt: 8.0 + int((tt - JG_DRINK) * 4) / 4.0 / (JG_B - JG_DRINK) * 6.9; F = lambda tt: c.get(S(tt) * 24)
+    def crop(f, s_, w, h, top, cx=960):
+        cw, ch = w / s_, h / s_; x0 = int(min(max(cx - cw / 2, 0), OW - cw)); y0 = int(min(max(160 - top * ch, 0), OH - ch)); return cv2.resize(f[y0:y0 + int(ch), x0:x0 + int(cw)], (w, h), interpolation=cv2.INTER_CUBIC)
+    if n == 1:                                        # one held frame, only the size jumps
+        zs = [1.0, 1.7, 1.3, 2.4, 1.8, 3.2]; out = crop(F(k0), zs[int(since * 9) % len(zs)], OW, OH, 0.12)
+    elif n == 2:                                      # her in the middle; on the left only the sip, on the right only the sneakers
+        f = F(t); out = np.zeros((OH, OW, 3), np.uint8); out[:, SW:SW + CW] = crop(f, 2.0, CW, OH, 0.10)
+        out[:, :SW] = crop(f, 5.2, SW, OH, 0.10); sn = f[900:1040, 925:993]; out[:, OW - SW:] = cv2.resize(cv2.copyMakeBorder(sn, 0, 0, 0, 0, cv2.BORDER_REPLICATE), (SW, OH), interpolation=cv2.INTER_CUBIC)
+    else: out = F(t).copy()                           # the whole wall of swirls, her small against it
+    if since < 0.05 and n > 0: out = np.clip(out.astype(np.int16) + 60, 0, 255).astype(np.uint8)
+    return _lines(out)
+
+
+# ---------------------------------------------------------------- 1:32  the black dress floods with colour, and then the whole wall does (replaces the drink)
+def bloom(fr, t):
+    if 'b' not in _jg: _jg['b'] = Clip('clips/sd10.mp4')
+    c = _jg['b']; ks = kicks_in(JG_DRINK - 0.05, t); n = max(0, len(ks) - 1); k0 = float(ks[-1]) if len(ks) else JG_DRINK; since = t - k0
+    S = lambda tt: 0.3 + (int(tt * 12) / 12.0 - JG_DRINK) / (JG_B - JG_DRINK) * 3.3; F = lambda sec: c.get(sec * 24)
+    def crop(f, s_, w, h, top=0.10):
+        cw, ch = w / s_, h / s_; x0 = int(min(max(965 - cw / 2, 0), OW - cw)); y0 = int(min(max(118 - top * ch, 0), OH - ch)); return cv2.resize(f[y0:y0 + int(ch), x0:x0 + int(cw)], (w, h), interpolation=cv2.INTER_CUBIC)
+    if n == 0: out = F(S(t)).copy()                                        # the whole wall; the colour starts climbing her dress
+    elif n == 1:                                                           # one held frame, only the size jumps — into the pattern on the dress
+        zs = [1.0, 1.8, 1.3, 2.6, 1.9, 3.4]; out = crop(F(S(k0)), zs[int(since * 9) % len(zs)], OW, OH, 0.14)
+    elif n == 2:                                                           # before, now, after: black dress on the left, what she is turning into on the right
+        out = np.zeros((OH, OW, 3), np.uint8); out[:, SW:SW + CW] = crop(F(S(t)), 1.9, CW, OH)
+        out[:, :SW] = crop(F(0.15), 2.6, SW, OH); out[:, OW - SW:] = crop(F(4.6 + 0.3 * math.sin(t * 9)), 2.6, SW, OH)
+    else: out = F(4.9).copy()                                              # all of it in full colour
+    if since < 0.06 and n > 0: out = np.clip(out.astype(np.int16) + 80, 0, 255).astype(np.uint8)
     return _lines(out)
